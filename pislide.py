@@ -8,7 +8,7 @@
 # http://learn.adafruit.com/adafruit-pitft-28-inch-resistive-touchscreen-display-raspberry-pi
 #
 # pislide.py by Dave Creith (dave@creith.net)
-# usability changes - use fractions of seconds, additional parameter entry
+# usability changes, use fractions of seconds, additional parameter entry
 #
 # based on lapse.py by David Hunt (dave@davidhunt.ie)
 # based on cam.py by Phil Burgess / Paint Your Dragon for Adafruit Industries.
@@ -29,6 +29,7 @@ import sys
 from pygame.locals import *
 from subprocess import call
 from time import sleep
+
 from datetime import datetime, timedelta
 
 # UI classes ---------------------------------------------------------------
@@ -152,6 +153,17 @@ def motorCallback(n): # Pass 1 (next setting) or -1 (prev setting)
             motorRunning = 0
             gpio.digitalWrite(motorpinA,gpio.LOW)
             gpio.digitalWrite(motorpinB,gpio.LOW)
+    elif n == 3:
+        if motorRunning == 1:
+            motorRunning = 0
+            gpio.digitalWrite(motorpinA,gpio.LOW)
+            gpio.digitalWrite(motorpinB,gpio.LOW)
+        if motorDirection == 0:
+            motorDirection = 1
+            motorpin = motorpinA
+        elif motorDirection == 1:
+            motorDirection = 0
+            motorpin = motorpinB
 
 def numericCallback(n): # Pass 1 (next setting) or -1 (prev setting)
     global screenMode
@@ -163,26 +175,24 @@ def numericCallback(n): # Pass 1 (next setting) or -1 (prev setting)
     if n < 10:
         numberstring = numberstring + str(n)
     elif n == 10:
-        numberstring = numberstring[:-1]
+        numberstring = numberstring[:-1*(len(numberstring))]
     elif n == 11:
         screenMode = 1
     elif n == 12:
         screenMode = returnScreen
-        numeric = int(numberstring)
-        v[dict_idx] = numeric
+        if numberstring:
+            numeric = int(numberstring)
+            v[dict_idx] = numeric
     elif n == 13:
         screenMode = returnScreen
-    #    numerator, slash, denominator = numberstring.partition("/")
-    #    if numerator slash and denominator and is_integer(denominator) and is_integer(numerator):
-    #        numeric = int(numerator) / int(denominator)
-    #    elif numerator and is_integer(numerator):
-    #        numeric = float(numerator)
-        numeric = float(numberstring)
-        v[dict_idx] = numeric
+        if len(numberstring) > 0:
+            numeric = float(numberstring)
+            v[dict_idx] = numeric
     elif n == 14:
         screenMode = returnScreen
-        numeric = 1 / float(numberstring)
-        v[dict_idx] = numeric
+        if len(numberstring) > 0:
+            numeric = 1 / float(numberstring)
+            v[dict_idx] = numeric
 
 def settingCallback(n): # Pass 1 (next setting) or -1 (prev setting)
     global screenMode
@@ -197,33 +207,21 @@ def valuesCallback(n): # Pass 1 (next setting) or -1 (prev setting)
     global numeric
     global v
     global dict_idx
-    global settling_time
-    global pause_time
-    global shoot_time
-    global travel_time
-    global travel_pulse
-    global frame_time
-    global shutter_time
-    global focus_pause
 
     if n == -1:
         screenMode = 0
-        # calc the timelapse execution settings here for best performance
-        settling_time = float(v['Settle'])                              # time to wait before firing shutter
-        shutter_time = float(v['Shutter'])                              # shutter speed
-        frame_time = (shutter_time + settling_time + focus_pause) 		# time for 1 image in seconds
-        shoot_time = frame_time * int(v['Images'])                      # time for all images in seconds
-        travel_time = (int(v['Distance']) / int(v['Speed']))             # total travel time for full rail in seconds
-        distance_between = (int(v['Distance']) / int(v['Images']))      # distance between shots in mm
-        travel_pulse = distance_between / int(v['Speed'])               # travel time between images in seconds
-
-        # set the pause time between shots to fill defined Timespan setting
-        pause_time = ((int(v['Timespan']) - (shoot_time + travel_time)) / int(v['Images']))
         saveSettings()
+        reasonableValues()
+        timelapseSettings()
 
     if n == 1:
         dict_idx='Shutter'
-        numberstring = str(v[dict_idx])
+        # set the source icon here
+        sValue = float(v[dict_idx])
+        if (sValue < 1):
+            numberstring = str(int(1 / sValue))
+        else:
+            numberstring = str(v[dict_idx])
         screenMode = 3
         returnScreen = 1
     elif n == 2:
@@ -243,7 +241,11 @@ def valuesCallback(n): # Pass 1 (next setting) or -1 (prev setting)
         returnScreen = 1
     elif n == 5:
         dict_idx='Settle'
-        numberstring = str(v[dict_idx])
+        sValue = float(v[dict_idx])
+        if (sValue < 1):
+            numberstring = str(int(1 / sValue))
+        else:
+            numberstring = str(v[dict_idx])
         screenMode = 3
         returnScreen = 1
     elif n == 6:
@@ -267,6 +269,7 @@ def doneCallback(): # Exit settings
 def startCallback(n): # start/Stop the timelapse thread
     global t, busy, threadExited
     global currentframe
+    global consumed_time
     if n == 1:
         if busy == False:
             if (threadExited == True):
@@ -279,6 +282,8 @@ def startCallback(n): # start/Stop the timelapse thread
             busy = False
             t.join()
             currentframe = 0
+            consumed_time = 0
+            task_indicator  = "done"
             # Re-instanciate the object for the next time around.
             t = threading.Thread(target=timeLapse)
 
@@ -298,65 +303,52 @@ def timeLapse():
     global focus_pause
     global frame_interval
     global currentframe
+    global consumed_time
+    global task_indicator
 
     busy = True
 
-    settling_time = float(v['Settle'])                              # time to wait before firing shutter
-    shutter_time = float(v['Shutter'])                              # shutter speed
-    frame_time = (shutter_time + settling_time + focus_pause) 		# time for 1 image in seconds
-    shoot_time = frame_time * int(v['Images'])                      # time for all images in seconds
-    travel_time = (int(v['Distance']) / int(v['Speed']))            # total travel time for full rail in seconds
-    distance_between = (int(v['Distance']) / int(v['Images']))      # distance between shots in mm
-    travel_pulse = distance_between / int(v['Speed'])               # travel time between images in seconds
-
-    # set the pause time between shots to fill defined Timespan setting
-    pause_time = (((int(v['Timespan']) * 60) - (shoot_time + travel_time)) / int(v['Images']))
-
-    frame_interval = pause_time + frame_time                        # total time to take 1 image including pause
+#   timelapseSettings()
 
     for i in range( 1 , v['Images'] + 1 ):
         if busy == False:
             break
-        currentframe = i
 
-        # move slide forward
-        gpio.digitalWrite(motorpin,gpio.HIGH)
-        sleep(travel_pulse)
-        gpio.digitalWrite(motorpin,gpio.LOW)
-        sleep(settling_time)
+        # move slide forward on all but first image
+        if i!=1:
+            task_indicator = "travel"
+            gpio.digitalWrite(motorpin,gpio.HIGH)
+            pause_it(travel_pulse)
+            gpio.digitalWrite(motorpin,gpio.LOW)
+
+        task_indicator = "settling"
+        pause_it(settling_time)
 
         # disable the backlight, critical for night timelapses, also saves power
-        os.system("echo '0' > /sys/class/gpio/gpio252/value")
+#        os.system("echo '0' > /sys/class/gpio/gpio252/value")
 
+        task_indicator = "fire"
         # trigger the focus
         gpio.digitalWrite(focuspin,gpio.HIGH)
-        sleep(focus_pause)
+        pause_it(focus_pause)
 
         # trigger the shutter
         gpio.digitalWrite(shutterpin,gpio.HIGH)
-        sleep(shutter_time)
+        pause_it(shutter_time)
         gpio.digitalWrite(shutterpin,gpio.LOW)
         gpio.digitalWrite(focuspin,gpio.LOW)
 
+        currentframe = i
+
         #  enable the backlight
-        os.system("echo '1' > /sys/class/gpio/gpio252/value")
+#        os.system("echo '1' > /sys/class/gpio/gpio252/value")
 
-#        if pause_time > 10:
-#            pause_chunk = int(pause_time / 10)
-#            pause_bit = pause_time - (pause_chunk * 10)
-#            xcor = 60
-#            for pause_chunk
-#                xcor =+ 40
-#                screen.blit("icons/progress.png", (10, 2))
-#                sleep(9)
-#            if pause_bit > 0:
-#                sleep(pause_bit)
-#        elif pause_time > 0:
-#            sleep(pause_time)
-
-        sleep(pause_time)
+        task_indicator = "pause"
+        pause_it(pause_time)
 
     currentframe = 0
+    consumed_time = 0
+    task_indicator  = "done"
     busy = False
     threadExited = True
 
@@ -374,6 +366,110 @@ def is_float(s):
     except ValueError:
         return False
 
+def reasonableValues():
+    global v
+    global dict_idx
+    global focus_pause
+    if not is_float(v['Settle']):    v['Settle'] = 0
+    if not is_float(v['Shutter']):   v['Shutter'] = 1 / 60
+    if not is_integer(v['Images']):  v['Images'] = 10
+    if not is_integer(v['Speed']):   v['Speed'] = 30
+    if not is_integer(v['Distance']):v['Distance'] = 500
+    if not is_integer(v['Timespan']):v['Timespan'] = 30
+
+    if    v['Shutter']==0: v['Shutter'] = 1 / 60
+    elif  v['Shutter']<(1/8000): v['Shutter'] = 1 / 60
+    elif  v['Shutter']>90: v['Shutter'] = 1 / 60
+
+    if v['Images']==0 or v['Images'] > 500: v['Images'] = 10
+
+    if v['Speed']==0: v['Speed'] = 30
+
+    if    v['Distance']==0: v['Distance'] = 1000
+    elif  v['Distance']<v['Speed']: v['Distance'] = v['Speed']
+    elif  v['Distance']>5000: v['Distance'] = 1000
+
+    if    v['Timespan']<(1): v['Timespan'] = 30
+    elif  v['Timespan']>1440: v['Timespan'] = 60
+
+def timelapseSettings():
+    global v
+    global dict_idx
+    global settling_time
+    global shutter_time
+    global travel_pulse
+    global pause_time
+    global focus_pause
+    global frame_interval
+    global consumed_time
+    global current_frame     #debug
+
+    settling_time = float(v['Settle'])                              # time to wait before firing shutter
+    shutter_time = float(v['Shutter'])                              # shutter speed
+    frame_time = (shutter_time + settling_time + focus_pause) 		# time for 1 image in seconds
+    shoot_time = frame_time * int(v['Images'])                      # time for all images in seconds
+    travel_time = round((float(v['Distance']) / float(v['Speed'])),1)            # total travel time for full rail in seconds
+    distance_between = round((float(v['Distance']) / (float(v['Images'])-1)),1)  # distance between shots in mm
+    travel_pulse = round(distance_between / float(v['Speed']),1)    # travel time between images in seconds
+
+    # set the pause time between shots to fill defined Timespan setting
+    pause_time = (((int(v['Timespan']) * 60) - (shoot_time + travel_time)) / (int(v['Images'])-1))
+    frame_interval = pause_time + frame_time                        # total time to take 1 image including pause
+    consumed_time = 0
+
+    #debug
+    print "v['Shutter']....." + str(v['Shutter'])
+    print "v['Timespan']...." + str(v['Timespan'])
+    print "v['Images']......" + str(v['Images'])
+    print "v['Distance']...." + str(v['Distance'])
+    print "v['Settle']......" + str(v['Settle'])
+    print "v['Speed']......." + str(v['Speed'])
+    print "settling_time...." + str(settling_time)
+    print "shutter_time....." + str(shutter_time)
+    print "frame_time......." + str(frame_time)
+    print "shoot_time......." + str(shoot_time)
+    print "travel_time......" + str(travel_time)
+    print "distance_between." + str(distance_between)
+    print "travel_pulse....." + str(travel_pulse)
+    print "pause_time......." + str(pause_time)
+    print "frame_interval..." + str(frame_interval)
+    print "currentframe....." + str(currentframe)
+    remaining = round((float(v['Timespan']) * 60) - consumed_time,1)
+    print "remaining........" + str(remaining)
+    sec = timedelta(seconds=int(remaining))
+    print "sec.............." + str(sec)
+    #debug
+
+def pause_it(n):
+    global consumed_time
+
+    consumed_time = consumed_time + n
+    sleep(n)
+
+def xPos(lbl,j,s,mf):
+    labelwidth = mf.size(lbl)[0]
+    l = [5,65,5,5]            # leftmost co-ordinates for screens 0->3
+    r = [320,260,320,320]     # rightmost co-ordinates for screens 0->3
+    if j==0:
+        x = l[s]
+    else:
+        x = r[s] - (labelwidth + 5)
+        if x < 0:
+            x = 160
+    return x
+
+def targetIcon(p):
+    rIcon = pi["done"]
+    #debug
+    print "targetIcon p..." + p
+    if p:
+        pl = str(p.lower())
+        print "targetIcon pl..." + pl
+        for i in icons:           #   For each icon...
+            if pl == i.name:       #    Compare names; match?
+                rIcon = i.bitmap    #     Use icon
+    return rIcon
+
 def signal_handler(signal, frame):
     print 'got SIGTERM'
     pygame.quit()
@@ -390,7 +486,6 @@ returnScreen    = 0
 iconPath        = 'icons' # Subdirectory containing UI bitmaps (PNG format)
 
 whitefont = (255, 255, 255)
-blackfont = (0, 0, 0)
 smallfont = 24
 mediumfont = 30
 largefont = 50
@@ -405,11 +500,24 @@ motorpinA       = 18
 motorpinB       = 27
 motorpin        = motorpinA
 backlightpin    = 252
+
+consumed_time   = 0.0
 currentframe    = 0
+
+# fall back defaults - to be removed
+travel_pulse    = 0.0
+
 framecount      = 100
 settling_time   = 0.2
 shutter_time    = 0.2
+frame_interval  = 0.7
+travel_time     = 2.0
+
+# defined focus pause in milliseconds
 focus_pause     = 0.3
+
+task_indicator  = "done"
+last_task       = task_indicator
 
 dict_idx	    = "Shutter"
 # shutter, settle are in seconds
@@ -424,18 +532,19 @@ v = { "Shutter": 2,
     "Speed": 30,
     "Settle": 1}
 
-settling_time = float(v['Settle'])                              # time to wait before firing shutter
-shutter_time = float(v['Shutter'])                              # shutter speed
-frame_time = (shutter_time + settling_time + focus_pause) 		# time for 1 image in seconds
-shoot_time = frame_time * int(v['Images'])                      # time for all images in seconds
-travel_time = (int(v['Distance']) / int(v['Speed']))            # total travel time for full rail in seconds
-distance_between = (int(v['Distance']) / int(v['Images']))      # distance between shots in mm
-travel_pulse = distance_between / int(v['Speed'])               # travel time between images in seconds
+pi = {"settling": pygame.image.load(iconPath + '/settling.png'),
+      "fire": pygame.image.load(iconPath + '/fire.png'),
+      "travel": pygame.image.load(iconPath + '/travel.png'),
+      "pause": pygame.image.load(iconPath + '/pause.png'),
+      "done": pygame.image.load(iconPath + '/direction.png')}
 
-# set the pause time between shots to fill defined Timespan setting
-pause_time = ((int(v['Timespan']) - (shoot_time + travel_time)) / int(v['Images']))
+md = {0: pygame.image.load(iconPath + '/directionleft.png'),
+      1:pygame.image.load(iconPath + '/directionright.png')}
 
-frame_interval = pause_time + frame_time                        # total time to take 1 image including pause
+smd = {0: pygame.image.load(iconPath + '/littleleft.png'),
+       1:pygame.image.load(iconPath + '/littleright.png')}
+smdx = {0: 5,
+        1: 285}
 
 icons = [] # This list gets populated at startup
 
@@ -478,7 +587,7 @@ buttons = [
    Button((  0, 60, 60, 60), bg='7',     cb=numericCallback, value=7),
    Button(( 60, 60, 60, 60), bg='8',     cb=numericCallback, value=8),
    Button((120, 60, 60, 60), bg='9',     cb=numericCallback, value=9),
-   Button((240,120, 80, 60), bg='del',   cb=numericCallback, value=10),
+   Button((240,120, 80, 60), bg='clear', cb=numericCallback, value=10),
    Button((180,180,140, 60), bg='update',cb=numericCallback, value=12),
    Button((180, 60,140, 60), bg='cancel',cb=numericCallback, value=11)],
 
@@ -494,7 +603,7 @@ buttons = [
    Button((  0, 60, 60, 60), bg='7',       cb=numericCallback, value=7),
    Button(( 60, 60, 60, 60), bg='8',       cb=numericCallback, value=8),
    Button((120, 60, 60, 60), bg='9',       cb=numericCallback, value=9),
-   Button((240,120, 80, 60), bg='del',     cb=numericCallback, value=10),
+   Button((240,120, 80, 60), bg='clear',   cb=numericCallback, value=10),
    Button((180,180, 60, 60), bg='second',  cb=numericCallback, value=13),
    Button((240,180, 80, 60), bg='fraction',cb=numericCallback, value=14),
    Button((180, 60,140, 60), bg='cancel',  cb=numericCallback, value=11)]
@@ -577,17 +686,27 @@ os.system("echo '1' > /sys/class/gpio/gpio252/value")
 
 print"Load Settings"
 loadSettings() # Must come last; fiddles with Button/Icon states
+reasonableValues() # Validate that the execution parms make sense
+timelapseSettings() # Calculate timelapse execution values
 
 print "loading background.."
 img    = pygame.image.load("icons/PiSlide.png")
 
+# define the screen background from the image
+#
 if img is None or img.get_height() < 240: # Letterbox, clear background
   screen.fill(0)
 if img:
   screen.blit(img,
     ((320 - img.get_width() ) / 2,
      (240 - img.get_height()) / 2))
+
+# new stuff
+#background = pygame.Surface(screen.get_size())
+# new stuff
+
 pygame.display.update()
+
 sleep(1)
 
 # Main loop ----------------------------------------------------------------
@@ -626,86 +745,105 @@ while True:
   for i,b in enumerate(buttons[screenMode]):
     b.draw(screen)
 
-  # write text on screen
+# keypad screens
   if screenMode == 3 or screenMode == 2:
     myfont = pygame.font.SysFont("Arial", largefont)
-    label = myfont.render(numberstring, 1, (whitefont))
-    screen.blit(label, (10, 2))
-    # TBC -> blit the icon of the button pushed to get here
+    myfont.set_bold(False)
+    label = myfont.render(numberstring , 1, (whitefont))
+    screen.blit(label, (xPos(numberstring,0,screenMode,myfont), 2))
+    # blit the icon of the button pushed to get here
+    screen.blit(targetIcon(dict_idx), (260, 0))
 
+# parameter screen
   if screenMode == 1:
     myfont = pygame.font.SysFont("Arial", smallfont)
-#    print "Shutter" % str(v['Shutter'])
+    myfont.set_bold(True)
+
     sValue = float(v['Shutter'])
     if (sValue < 1):
         numeric = int(1 / sValue)
-        numeric = sValue
-        label = myfont.render("1/" + str(numeric) + "s" , 1, (whitefont))
+        labeltext = "1/" + str(numeric) + "s"
     else:
         numeric = int(sValue)
-        label = myfont.render(str(numeric) + "s" , 1, (whitefont))
-    screen.blit(label, (70, 10))
+        labeltext = str(numeric) + "s"
+    label = myfont.render(labeltext , 1, (whitefont))
+    screen.blit(label, (xPos(labeltext,0,screenMode,myfont), 10))
 
-    label = myfont.render(str(v['Timespan']) + "min" , 1, (whitefont))
-    screen.blit(label, (70, 70))
-    label = myfont.render(str(v['Images']) , 1, (whitefont))
-    screen.blit(label, (70,130))
+    labeltext = str(v['Timespan']) + "min"
+    label = myfont.render(labeltext , 1, (whitefont))
+    screen.blit(label, (xPos(labeltext,0,screenMode,myfont), 70))
 
-    label = myfont.render(str(v['Distance']) + "mm" , 1, (whitefont))
-    screen.blit(label, (170, 10))
+    labeltext = str(v['Images'])
+    label = myfont.render(labeltext , 1, (whitefont))
+    screen.blit(label, (xPos(labeltext,0,screenMode,myfont), 130))
+
+    labeltext = str(v['Distance']) + "mm"
+    label = myfont.render(labeltext , 1, (whitefont))
+    screen.blit(label, (xPos(labeltext,1,screenMode,myfont), 10))
 
     sValue = float(v['Settle'])
-    if (sValue < 1):
-        numeric = int(1 / sValue)
-        numeric = sValue
-        label = myfont.render("1/" + str(numeric) + "s" , 1, (whitefont))
-    else:
+    if (sValue == 0):
         numeric = int(sValue)
         label = myfont.render(str(numeric) + "s" , 1, (whitefont))
-    screen.blit(label, (170,70))
+    elif (sValue < 1):
+        numeric = int(1 / sValue)
+        labeltext = "1/" + str(numeric) + "s"
+    else:
+        numeric = int(sValue)
+        labeltext = str(numeric) + "s"
+    label = myfont.render(labeltext , 1, (whitefont))
+    screen.blit(label, (xPos(labeltext,1,screenMode,myfont), 70))
 
-    label = myfont.render(str(v['Speed']) + "mm/s" , 1, (whitefont))
-    screen.blit(label, (170, 130))
+    labeltext = str(v['Speed']) + "mm/s"
+    label = myfont.render(labeltext , 1, (whitefont))
+    screen.blit(label, (xPos(labeltext,1,screenMode,myfont), 130))
+#   current motor direction
+    screen.blit(md[motorDirection], (60 ,180))
 
+# initial (home) screen
   if screenMode == 0:
     myfont = pygame.font.SysFont("Arial", mediumfont)
+    myfont.set_bold(False)
+
+    if task_indicator != last_task:
+        screen.blit(pi[task_indicator], (130, 2))
 
     sValue = float(v['Shutter'])
     if (sValue < 1):
         numeric = int(1 / sValue)
-        label = myfont.render("1/" + str(numeric) + "s" , 1, (whitefont))
+        labeltext = "1/" + str(numeric) + "s"
     else:
         numeric = int(sValue)
-        label = myfont.render(str(numeric) + "s" , 1, (whitefont))
-    screen.blit(label, (10, 10))
+        labeltext = str(numeric) + "s"
+    label = myfont.render(labeltext , 1, (whitefont))
+    screen.blit(label, (xPos(labeltext,0,screenMode,myfont), 10))
 
-# temp debug values
-    numeric = int(sValue)
-    label = myfont.render("p=" + str(pause_time), 1, (whitefont))
-    screen.blit(label, (10, 50))
-    numeric = int(sValue)
-    label = myfont.render("t=" + str(travel_time), 1, (whitefont))
-    screen.blit(label, (150, 50))
-#    numeric = int(sValue)
-#    label = myfont.render("pause=" + str(pause_time), 1, (whitefont))
-#    screen.blit(label, (10, 90))
-# temp debug values
-
-    label = myfont.render("Frames:" , 1, (whitefont))
-    screen.blit(label, (10, 90))
-    label = myfont.render("Remaining:" , 1, (whitefont))
-    screen.blit(label, (10,130))
-
-    label = myfont.render(str(currentframe) + " of " + str(v['Images']) , 1, (whitefont))
-    screen.blit(label, (160, 90))
-
-    remaining = float((frame_interval * (v['Images'] - currentframe)))
-    sec = timedelta(seconds=int(remaining))
-    d = datetime(1,1,1) + sec
-    remainingStr = "%dh%dm%ds" % (d.hour, d.minute, d.second)
-
-    label = myfont.render(remainingStr , 1, (whitefont))
-    screen.blit(label, (160, 130))
+#   run time
+    labeltext = str(round(travel_pulse,0)) + "s"
+    label = myfont.render(labeltext , 1, (whitefont))
+    screen.blit(label, (xPos(labeltext,1,screenMode,myfont), 90))
+#   pause time
+    labeltext = str(round(pause_time,0)) + "s"
+    label = myfont.render(labeltext , 1, (whitefont))
+    screen.blit(label, (xPos(labeltext,1,screenMode,myfont), 10))
+#   images remaining
+    labeltext = str(currentframe) + " of " + str(v['Images'])
+    label = myfont.render(labeltext , 1, (whitefont))
+    screen.blit(label, (xPos(labeltext,0,screenMode,myfont), 50))
+#   time remaining
+#    remaining = float((frame_interval * (v['Images'] - currentframe)))
+    remaining = round((float(v['Timespan']) * 60) - consumed_time,1)
+    if remaining > 0:
+        sec = timedelta(seconds=int(remaining))
+        d = datetime(1,1,1) + sec
+        if d.hour > 0:
+            labeltext = "%dh%dm%ds" % (d.hour, d.minute, d.second)
+        else:
+            labeltext = "%dm%ds" % (d.minute, d.second)
+        label = myfont.render(labeltext , 1, (whitefont))
+        screen.blit(label, (xPos(labeltext,1,screenMode,myfont), 50))
+#   show the motor direction
+    screen.blit(smd[motorDirection], (smdx[motorDirection],150))
 
   pygame.display.update()
 
