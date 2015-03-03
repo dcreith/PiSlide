@@ -8,7 +8,8 @@
 # http://learn.adafruit.com/adafruit-pitft-28-inch-resistive-touchscreen-display-raspberry-pi
 #
 # pislide.py by Dave Creith (dave@creith.net)
-# usability changes, use fractions of seconds, additional parameter entry
+# usability changes, use fractions of seconds, additional parameter entry, error handling,
+# GPIO cleanup, breaks in long sleeps to capture button press
 #
 # based on lapse.py by David Hunt (dave@davidhunt.ie)
 # based on cam.py by Phil Burgess / Paint Your Dragon for Adafruit Industries.
@@ -25,10 +26,12 @@ import pygame
 import threading
 import signal
 import sys
+import time
 
 from pygame.locals import *
 from subprocess import call
-from time import sleep
+#from time import sleep
+
 
 from datetime import datetime, timedelta
 
@@ -120,10 +123,23 @@ class Button:
 # These are defined before globals because they're referenced by items in
 # the global buttons[] list.
 
-def motorCallback(n): # Pass 1 (next setting) or -1 (prev setting)
+def backlightCallback(n):         # toggle the screen backlight on and off
+    global backlightState
+    
+    if backlightState==0:
+        # ensable the backlight, critical for night timelapses, also saves power
+        backlightState=1
+        os.system("echo '1' > /sys/class/gpio/gpio252/value")
+    else:
+        # disable the backlight, critical for night timelapses, also saves power
+        backlightState=0
+        os.system("echo '0' > /sys/class/gpio/gpio252/value")
+
+def motorCallback(n):             # set the motor direction and run the motor
     global screenMode
     global motorRunning
     global motorDirection
+    global motorDirectionPrior
     global motorpin
     global motorpinA
     global motorpinB
@@ -132,8 +148,8 @@ def motorCallback(n): # Pass 1 (next setting) or -1 (prev setting)
     # change motor direction
     # if motor is running then shut it off
     # if motor is not running then start it
-    # motorDirection is extraeneous
     if n == 1:
+        motorDirectionPrior = motorDirection
         motorDirection = 1
         motorpin = motorpinA
         if motorRunning == 0:
@@ -144,6 +160,7 @@ def motorCallback(n): # Pass 1 (next setting) or -1 (prev setting)
             gpio.digitalWrite(motorpinA,gpio.LOW)
             gpio.digitalWrite(motorpinB,gpio.LOW)
     elif n == 2:
+        motorDirectionPrior = motorDirection
         motorDirection = 0
         motorpin = motorpinB
         if motorRunning == 0:
@@ -159,48 +176,51 @@ def motorCallback(n): # Pass 1 (next setting) or -1 (prev setting)
             gpio.digitalWrite(motorpinA,gpio.LOW)
             gpio.digitalWrite(motorpinB,gpio.LOW)
         if motorDirection == 0:
+            motorDirectionPrior = motorDirection
             motorDirection = 1
             motorpin = motorpinA
         elif motorDirection == 1:
+            motorDirectionPrior = motorDirection
             motorDirection = 0
             motorpin = motorpinB
 
-def numericCallback(n): # Pass 1 (next setting) or -1 (prev setting)
+def numericCallback(n):           # keypad capture
     global screenMode
     global returnScreen
     global numberstring
     global v
     global dict_idx
 
-    if n < 10:
+    if n < 10:                    # capture keystroke to value (0-9)
         numberstring = numberstring + str(n)
     elif n == 10:
         numberstring = numberstring[:-1*(len(numberstring))]
-    elif n == 11:
+    elif n == 11:                 # clear value
         screenMode = 1
-    elif n == 12:
+    elif n == 12:                 # return value as int
         screenMode = returnScreen
         if numberstring:
             numeric = int(numberstring)
             v[dict_idx] = numeric
-    elif n == 13:
+    elif n == 13:                 # return value as float (shutter & settling values)
         screenMode = returnScreen
         if len(numberstring) > 0:
             numeric = float(numberstring)
             v[dict_idx] = numeric
-    elif n == 14:
+    elif n == 14:                 # return value as fraction of second (float)
         screenMode = returnScreen
         if len(numberstring) > 0:
             numeric = 1 / float(numberstring)
             v[dict_idx] = numeric
 
-def settingCallback(n): # Pass 1 (next setting) or -1 (prev setting)
-    global screenMode
-    screenMode += n
-    if screenMode < 1:               screenMode = len(buttons) - 1
-    elif screenMode >= len(buttons): screenMode = 1
+# JDC not used
+#def settingCallback(n):           # JDC not used ???  Pass 1 (next setting) or -1 (prev setting)
+#    global screenMode
+#    screenMode += n
+#    if screenMode < 1:               screenMode = len(buttons) - 1
+#    elif screenMode >= len(buttons): screenMode = 1
 
-def valuesCallback(n): # Pass 1 (next setting) or -1 (prev setting)
+def valuesCallback(n):            # select a parameter and goto keypad (-1 returns to screen 0)
     global screenMode
     global returnScreen
     global numberstring
@@ -212,7 +232,8 @@ def valuesCallback(n): # Pass 1 (next setting) or -1 (prev setting)
         screenMode = 0
         saveSettings()
         reasonableValues()
-        timelapseSettings()
+        if timelapseSettings():         # Calculate timelapse execution values
+            task_indicator = 'stopped'
 
     if n == 1:
         dict_idx='Shutter'
@@ -221,7 +242,7 @@ def valuesCallback(n): # Pass 1 (next setting) or -1 (prev setting)
         if (sValue < 1):
             numberstring = str(int(1 / sValue))
         else:
-            numberstring = str(v[dict_idx])
+            numberstring = str(int(v[dict_idx]))
         screenMode = 3
         returnScreen = 1
     elif n == 2:
@@ -245,32 +266,42 @@ def valuesCallback(n): # Pass 1 (next setting) or -1 (prev setting)
         if (sValue < 1):
             numberstring = str(int(1 / sValue))
         else:
-            numberstring = str(v[dict_idx])
+            numberstring = str(int(v[dict_idx]))
         screenMode = 3
         returnScreen = 1
     elif n == 6:
         dict_idx='Speed'
-#		numberstring = str(v[dict_idx])
+    #	numberstring = str(v[dict_idx])
         numberstring = "30"
         screenMode = 2
         returnScreen = 1
 
-def viewCallback(n): # Viewfinder buttons
+def viewCallback(n):              # Set branch to parameters screen (screen 1)
     global screenMode, screenModePrior
     if n is 0:   # Gear icon
       screenMode = 1
+# JDC not needed
+#def doneCallback():               # Exit settings
+#    global screenMode
+##    if screenMode > 0:
+#      saveSettings()
+#    screenMode = 0                # Switch back to main window
 
-def doneCallback(): # Exit settings
-    global screenMode
-    if screenMode > 0:
-      saveSettings()
-    screenMode = 0 # Switch back to main window
-
-def startCallback(n): # start/Stop the timelapse thread
+def startCallback(n):             # start/Stop the timelapse thread
+    # threadExited - initiated as False
+    #              - set to True in timelapse when image count exhausted
+    #              - set to False here when starting a thread
+    # busy - initiated as False
+    #      - set to False here when explicitly ending the thread with keypad 'Stop'
+    #      - set to True at start of timelapse, False at completion
     global t, busy, threadExited
     global currentframe
     global consumed_time
+    global doneNotify
+    
     if n == 1:
+        print 'setLED 4'
+        setLED("running")
         if busy == False:
             if (threadExited == True):
                 # Re-instanciate the object for the next start
@@ -284,11 +315,19 @@ def startCallback(n): # start/Stop the timelapse thread
             currentframe = 0
             consumed_time = 0
             task_indicator  = "done"
+            doneNotify = time.time() + (30 * 1) # set done LED show delay
             # Re-instanciate the object for the next time around.
             t = threading.Thread(target=timeLapse)
 
-def timeLapse():
+def timeLapse():                  # execute the timelapse (separate thread)
     global busy, threadExited
+    # threadExited - initiated as False
+    #              - set to True here when image count exhausted
+    #              - set to False in on 'Start' from keypad when starting a thread
+    # busy - initiated as False
+    #      - set to False when explicitly ending the thread with keypad 'Stop'
+    #      - set to True here at start, False at completion
+    #      - breaks loop when False
     global v
     global motorpin
     global shutterpin
@@ -305,12 +344,17 @@ def timeLapse():
     global currentframe
     global consumed_time
     global task_indicator
+    global doneNotify
 
+    # set copies of the following to isolate operation from setup
+    # images, motorpin
+    # travelpulse, focus_pause, shutter_time, pause_time
+    
     busy = True
-
-#   timelapseSettings()
-
+    
+    # multitude of breaks to give fastest time out of loop
     for i in range( 1 , v['Images'] + 1 ):
+        this_time = 0.0
         if busy == False:
             break
 
@@ -318,36 +362,44 @@ def timeLapse():
         if i!=1:
             task_indicator = "travel"
             gpio.digitalWrite(motorpin,gpio.HIGH)
-            pause_it(travel_pulse)
+            time.sleep(travel_pulse)
             gpio.digitalWrite(motorpin,gpio.LOW)
-
+            this_time = this_time + travel_pulse
+            if busy == False:
+                break
+    
         task_indicator = "settling"
-        pause_it(settling_time)
+        time.sleep(settling_time)
+        this_time = this_time + settling_time
 
-        # disable the backlight, critical for night timelapses, also saves power
-#        os.system("echo '0' > /sys/class/gpio/gpio252/value")
-
+        if busy == False:
+            break
+            
         task_indicator = "fire"
         # trigger the focus
         gpio.digitalWrite(focuspin,gpio.HIGH)
-        pause_it(focus_pause)
+        time.sleep(focus_pause)
 
         # trigger the shutter
         gpio.digitalWrite(shutterpin,gpio.HIGH)
-        pause_it(shutter_time)
+        time.sleep(shutter_time)
         gpio.digitalWrite(shutterpin,gpio.LOW)
         gpio.digitalWrite(focuspin,gpio.LOW)
 
         currentframe = i
-
-        #  enable the backlight
-#        os.system("echo '1' > /sys/class/gpio/gpio252/value")
-
+        consumed_time = consumed_time + shutter_time + focus_pause + this_time
+        
+        if busy == False:
+            break
+    
         task_indicator = "pause"
-        pause_it(pause_time)
+        time.sleep(pause_time)
 
     currentframe = 0
     consumed_time = 0
+    
+    doneNotify = time.time() + (30 * 1)  # set done LED show delay
+    
     task_indicator  = "done"
     busy = False
     threadExited = True
@@ -401,6 +453,7 @@ def timelapseSettings():
     global pause_time
     global focus_pause
     global frame_interval
+    global frame_duration
     global consumed_time
     global current_frame     #debug
 
@@ -414,9 +467,21 @@ def timelapseSettings():
 
     # set the pause time between shots to fill defined Timespan setting
     pause_time = (((int(v['Timespan']) * 60) - (shoot_time + travel_time)) / (int(v['Images'])-1))
+    
+    # split the pause time between pause and settling times
+    if pause_time > (settling_time * 2):
+        pause_time = (pause_time + settling_time) / 2
+        settling_time = pause_time
+        
     frame_interval = pause_time + frame_time                        # total time to take 1 image including pause
+    frame_duration = frame_interval + travel_pulse                  # total time to take 1 image, pause and move
     consumed_time = 0
-
+    
+    errFound = False
+    if pause_time < 0:
+        errFound = True
+        errmsg = "Invalid timing-Update Parms"
+        
     #debug
     print "v['Shutter']....." + str(v['Shutter'])
     print "v['Timespan']...." + str(v['Timespan'])
@@ -439,14 +504,10 @@ def timelapseSettings():
     sec = timedelta(seconds=int(remaining))
     print "sec.............." + str(sec)
     #debug
-
-def pause_it(n):
-    global consumed_time
-
-    consumed_time = consumed_time + n
-    sleep(n)
-
-def xPos(lbl,j,s,mf):
+    
+    return errFound
+            
+def xPos(lbl,j,s,mf):         # determine starting x co-ordinate to place text
     labelwidth = mf.size(lbl)[0]
     l = [5,65,5,5]            # leftmost co-ordinates for screens 0->3
     r = [320,260,320,320]     # rightmost co-ordinates for screens 0->3
@@ -458,17 +519,39 @@ def xPos(lbl,j,s,mf):
             x = 160
     return x
 
-def targetIcon(p):
-    rIcon = pi["done"]
-    #debug
-    print "targetIcon p..." + p
-    if p:
-        pl = str(p.lower())
-        print "targetIcon pl..." + pl
-        for i in icons:           #   For each icon...
-            if pl == i.name:       #    Compare names; match?
-                rIcon = i.bitmap    #     Use icon
-    return rIcon
+def setLED(a):
+    global lastpin
+    print 'setLED.....' + str(lastpin) + ' a..' + str(a)
+    if a!=lastpin:
+        lastpin = a
+        if a=='start':       # white
+            gpio.digitalWrite(redpin,gpio.HIGH)
+            gpio.digitalWrite(greenpin,gpio.HIGH)
+            gpio.digitalWrite(bluepin,gpio.HIGH)
+        elif a=="ready":     # blue
+            gpio.digitalWrite(redpin,gpio.LOW)
+            gpio.digitalWrite(greenpin,gpio.LOW)
+            gpio.digitalWrite(bluepin,gpio.HIGH)
+        elif a=="running":   # green
+            gpio.digitalWrite(redpin,gpio.LOW)
+            gpio.digitalWrite(greenpin,gpio.HIGH)
+            gpio.digitalWrite(bluepin,gpio.LOW)
+        elif a=="done":      # red
+            gpio.digitalWrite(redpin,gpio.HIGH)
+            gpio.digitalWrite(greenpin,gpio.LOW)
+            gpio.digitalWrite(bluepin,gpio.LOW)
+        elif a=="magenta":   # magenta
+            gpio.digitalWrite(redpin,gpio.HIGH)
+            gpio.digitalWrite(greenpin,gpio.LOW)
+            gpio.digitalWrite(bluepin,gpio.HIGH)
+        elif a=="cyan":      # cyan
+            gpio.digitalWrite(redpin,gpio.LOW)
+            gpio.digitalWrite(greenpin,gpio.HIGH)
+            gpio.digitalWrite(bluepin,gpio.HIGH)
+        else:                # yellow
+            gpio.digitalWrite(redpin,gpio.HIGH)
+            gpio.digitalWrite(greenpin,gpio.HIGH)
+            gpio.digitalWrite(bluepin,gpio.LOW)
 
 def signal_handler(signal, frame):
     print 'got SIGTERM'
@@ -480,6 +563,9 @@ def signal_handler(signal, frame):
 t = threading.Thread(target=timeLapse)
 busy            = False
 threadExited    = False
+
+backlightState=1
+
 screenMode      =  0      # Current screen mode; default = viewfinder
 screenModePrior = -1      # Prior screen mode (for detecting changes)
 returnScreen    = 0
@@ -494,12 +580,19 @@ numeric         = 0       # number from numeric keypad
 numberstring	= "0"
 motorRunning	= 0
 motorDirection	= 0
-focuspin        = 16       # focus pin to be updated
+motorDirectionPrior = -1
+focuspin        = 23
 shutterpin      = 17
 motorpinA       = 18
 motorpinB       = 27
 motorpin        = motorpinA
 backlightpin    = 252
+
+redpin          = 14          # waiting
+greenpin        = 15          # running
+bluepin         = 22          # done
+lastpin         = 0
+doneNotify      = time.time()  # set done notify to now
 
 consumed_time   = 0.0
 currentframe    = 0
@@ -532,7 +625,15 @@ v = { "Shutter": 2,
     "Speed": 30,
     "Settle": 1}
 
-pi = {"settling": pygame.image.load(iconPath + '/settling.png'),
+vi = { "Shutter": pygame.image.load(iconPath + '/shutter.png'),
+       "Timespan": pygame.image.load(iconPath + '/timespan.png'),
+       "Images": pygame.image.load(iconPath + '/images.png'),
+       "Distance": pygame.image.load(iconPath + '/distance.png'),
+       "Speed": pygame.image.load(iconPath + '/speed.png'),
+       "Settle": pygame.image.load(iconPath + '/settle.png')}
+
+pi = {"stopping": pygame.image.load(iconPath + '/stopping.png'),
+      "settling": pygame.image.load(iconPath + '/settling.png'),
       "fire": pygame.image.load(iconPath + '/fire.png'),
       "travel": pygame.image.load(iconPath + '/travel.png'),
       "pause": pygame.image.load(iconPath + '/pause.png'),
@@ -559,9 +660,10 @@ icons = [] # This list gets populated at startup
 buttons = [
 
   # Screen mode 0 is main view screen of current status
-  [Button((  5,180,120, 60), bg='start', cb=startCallback, value=1),
-   Button((130,180, 60, 60), bg='gear',   cb=viewCallback, value=0),
-   Button((195,180,120, 60), bg='stop',  cb=startCallback, value=0)],
+  [Button((  5,180,120, 60), bg='start',     cb=startCallback, value=1),
+   Button((130,180, 60, 60), bg='gear',      cb=viewCallback, value=0),
+   Button((195,180,120, 60), bg='stop',      cb=startCallback, value=0),
+   Button((  0,  0,320,180), bg='bigbutton', cb=backlightCallback, value=0)],
 
   # Screen 1 for changing values and setting motor direction
   [Button((0,    0, 60, 60), bg='shutter',  cb=valuesCallback, value=1),
@@ -632,7 +734,7 @@ def loadSettings():
       infile.close()
     except:
       pass
-
+              
 
 # Initialization -----------------------------------------------------------
 
@@ -642,209 +744,280 @@ os.putenv('SDL_FBDEV'      , '/dev/fb1')
 os.putenv('SDL_MOUSEDRV'   , 'TSLIB')
 os.putenv('SDL_MOUSEDEV'   , '/dev/input/touchscreen')
 
+# --------
+try:  # capture exceptions
 
-# Init pygame and screen
-print "Initting..."
-pygame.init()
-print "Setting Mouse invisible..."
-pygame.mouse.set_visible(False)
-print "Setting fullscreen..."
-modes = pygame.display.list_modes(16)
-screen = pygame.display.set_mode(modes[0], FULLSCREEN, 16)
+    # Set up GPIO pins
+    print "Init GPIO pins..."
+    gpio = wiringpi2.GPIO(wiringpi2.GPIO.WPI_MODE_GPIO)
+    gpio.pinMode(shutterpin,gpio.OUTPUT)
+    gpio.pinMode(focuspin,gpio.OUTPUT)
+    gpio.pinMode(motorpinA,gpio.OUTPUT)
+    gpio.pinMode(motorpinB,gpio.OUTPUT)
+    gpio.pinMode(redpin,gpio.OUTPUT)
+    gpio.pinMode(bluepin,gpio.OUTPUT)
+    gpio.pinMode(greenpin,gpio.OUTPUT)
+    gpio.digitalWrite(motorpinA,gpio.LOW)
+    gpio.digitalWrite(motorpinB,gpio.LOW)
 
-print "Loading Icons..."
-# Load all icons at startup.
-for file in os.listdir(iconPath):
-  if fnmatch.fnmatch(file, '*.png'):
-    icons.append(Icon(file.split('.')[0]))
-# Assign Icons to Buttons, now that they're loaded
-print"Assigning Buttons"
-for s in buttons:        # For each screenful of buttons...
-  for b in s:            #  For each button on screen...
-    for i in icons:      #   For each icon...
-      if b.bg == i.name: #    Compare names; match?
-        b.iconBg = i     #     Assign Icon to Button
-        b.bg     = None  #     Name no longer used; allow garbage collection
-      if b.fg == i.name:
-        b.iconFg = i
-        b.fg     = None
+    # set external LED to start value
+    print 'setLED 1'
+    setLED("start")
+    
+    # I couldnt seem to get at pin 252 for the backlight using the usual method above,
+    # but this seems to work
+    os.system("echo 252 > /sys/class/gpio/export")
+    os.system("echo 'out' > /sys/class/gpio/gpio252/direction")
+    os.system("echo '1' > /sys/class/gpio/gpio252/value")
 
-# Set up GPIO pins
-print "Init GPIO pins..."
-gpio = wiringpi2.GPIO(wiringpi2.GPIO.WPI_MODE_GPIO)
-gpio.pinMode(shutterpin,gpio.OUTPUT)
-gpio.pinMode(focuspin,gpio.OUTPUT)
-gpio.pinMode(motorpinA,gpio.OUTPUT)
-gpio.pinMode(motorpinB,gpio.OUTPUT)
-gpio.digitalWrite(motorpinA,gpio.LOW)
-gpio.digitalWrite(motorpinB,gpio.LOW)
-# I couldnt seem to get at pin 252 for the backlight using the usual method above,
-# but this seems to work
-os.system("echo 252 > /sys/class/gpio/export")
-os.system("echo 'out' > /sys/class/gpio/gpio252/direction")
-os.system("echo '1' > /sys/class/gpio/gpio252/value")
+    # Init pygame and screen
+    print "Initting..."
+    pygame.init()
+    print "Setting Mouse invisible..."
+    pygame.mouse.set_visible(False)
+    print "Setting fullscreen..."
+    modes = pygame.display.list_modes(16)
+    screen = pygame.display.set_mode(modes[0], FULLSCREEN, 16)
 
-print"Load Settings"
-loadSettings() # Must come last; fiddles with Button/Icon states
-reasonableValues() # Validate that the execution parms make sense
-timelapseSettings() # Calculate timelapse execution values
-
-print "loading background.."
-img    = pygame.image.load("icons/PiSlide.png")
-
-# define the screen background from the image
-#
-if img is None or img.get_height() < 240: # Letterbox, clear background
-  screen.fill(0)
-if img:
-  screen.blit(img,
-    ((320 - img.get_width() ) / 2,
-     (240 - img.get_height()) / 2))
-
-# new stuff
-#background = pygame.Surface(screen.get_size())
-# new stuff
-
-pygame.display.update()
-
-sleep(1)
-
-# Main loop ----------------------------------------------------------------
-
-signal.signal(signal.SIGTERM, signal_handler)
-
-print "mainloop.."
-while True:
-
-  # Process touchscreen input
-  while True:
-
-    for event in pygame.event.get():
-      if(event.type is MOUSEBUTTONDOWN):
-        pos = pygame.mouse.get_pos()
-        for b in buttons[screenMode]:
-          if b.selected(pos): break
-      # why shut off the motor on mouse up ??????????
-      elif(event.type is MOUSEBUTTONUP):
-        motorRunning = 0
-        gpio.digitalWrite(motorpinA,gpio.LOW)
-        gpio.digitalWrite(motorpinB,gpio.LOW)
-
-    # if not on screen 0 or changing screens then leave event loop
-    if screenMode >= 0 or screenMode != screenModePrior: break
+    print "Loading Icons..."
+    # Load all icons at startup.
+    for file in os.listdir(iconPath):
+      if fnmatch.fnmatch(file, '*.png'):
+        icons.append(Icon(file.split('.')[0]))
+    # Assign Icons to Buttons, now that they're loaded
+    print"Assigning Buttons"
+    for s in buttons:        # For each screenful of buttons...
+      for b in s:            #  For each button on screen...
+        for i in icons:      #   For each icon...
+          if b.bg == i.name: #    Compare names; match?
+            b.iconBg = i     #     Assign Icon to Button
+            b.bg     = None  #     Name no longer used; allow garbage collection
+          if b.fg == i.name:
+            b.iconFg = i
+            b.fg     = None
 
 
-  if img is None or img.get_height() < 240: # Letterbox, clear background
-    screen.fill(0)
-  if img:
-    screen.blit(img,
-      ((320 - img.get_width() ) / 2,
-       (240 - img.get_height()) / 2))
+    print"Load Settings"
+    # Get settings from pickle, validate them and set timelapse execution
+    loadSettings() # Must come last; fiddles with Button/Icon states
+    reasonableValues() # Validate that the execution parms make sense
+    if timelapseSettings():         # Calculate timelapse execution values
+        task_indicator = 'stopping'
 
-  # Overlay buttons on display and update
-  for i,b in enumerate(buttons[screenMode]):
-    b.draw(screen)
+    print "loading background.."
+    img    = pygame.image.load("icons/PiSlide.png")
 
-# keypad screens
-  if screenMode == 3 or screenMode == 2:
-    myfont = pygame.font.SysFont("Arial", largefont)
-    myfont.set_bold(False)
-    label = myfont.render(numberstring , 1, (whitefont))
-    screen.blit(label, (xPos(numberstring,0,screenMode,myfont), 2))
-    # blit the icon of the button pushed to get here
-    screen.blit(targetIcon(dict_idx), (260, 0))
+    # define the screen background from the image
+    if img is None or img.get_height() < 240: # Letterbox, clear background
+      screen.fill(0)
+    if img:
+      screen.blit(img,
+        ((320 - img.get_width() ) / 2,
+         (240 - img.get_height()) / 2))
+    # show the screen
+    pygame.display.update()
+    time.sleep(1)
 
-# parameter screen
-  if screenMode == 1:
-    myfont = pygame.font.SysFont("Arial", smallfont)
-    myfont.set_bold(True)
+    # Main loop ----------------------------------------------------------------
 
-    sValue = float(v['Shutter'])
-    if (sValue < 1):
-        numeric = int(1 / sValue)
-        labeltext = "1/" + str(numeric) + "s"
-    else:
-        numeric = int(sValue)
-        labeltext = str(numeric) + "s"
-    label = myfont.render(labeltext , 1, (whitefont))
-    screen.blit(label, (xPos(labeltext,0,screenMode,myfont), 10))
+    signal.signal(signal.SIGTERM, signal_handler)
 
-    labeltext = str(v['Timespan']) + "min"
-    label = myfont.render(labeltext , 1, (whitefont))
-    screen.blit(label, (xPos(labeltext,0,screenMode,myfont), 70))
+    print "mainloop.."
+    while True:
+    # loop until ^C
+    #
+    # 1. capture event loop until button pushed, not on screen 0 or screen change
+    # 2. blit background
+    # 3. draw icons and buttons based on current screen
+    # 4. blit screen specific output based on current screen - screenMode
+    # 5. screen update
+    # 6. set screenModePrior to current screenMode
 
-    labeltext = str(v['Images'])
-    label = myfont.render(labeltext , 1, (whitefont))
-    screen.blit(label, (xPos(labeltext,0,screenMode,myfont), 130))
+        # on completion of timelapse set 'ready' LED on after 'done' LED
+        if busy == False:
+            if time.time() > doneNotify:
+                print 'setLED 2'
+                setLED("ready")
+            else:
+                print 'setLED 3'
+                setLED("done")
+            
+        # Process touchscreen input
+        while True:
 
-    labeltext = str(v['Distance']) + "mm"
-    label = myfont.render(labeltext , 1, (whitefont))
-    screen.blit(label, (xPos(labeltext,1,screenMode,myfont), 10))
+            for event in pygame.event.get():
+              if(event.type is MOUSEBUTTONDOWN):
+                pos = pygame.mouse.get_pos()
+                for b in buttons[screenMode]:
+                  if b.selected(pos): break
+              # why shut off the motor on mouse up ??????????
+              elif(event.type is MOUSEBUTTONUP):
+                motorRunning = 0
+                gpio.digitalWrite(motorpinA,gpio.LOW)
+                gpio.digitalWrite(motorpinB,gpio.LOW)
 
-    sValue = float(v['Settle'])
-    if (sValue == 0):
-        numeric = int(sValue)
-        label = myfont.render(str(numeric) + "s" , 1, (whitefont))
-    elif (sValue < 1):
-        numeric = int(1 / sValue)
-        labeltext = "1/" + str(numeric) + "s"
-    else:
-        numeric = int(sValue)
-        labeltext = str(numeric) + "s"
-    label = myfont.render(labeltext , 1, (whitefont))
-    screen.blit(label, (xPos(labeltext,1,screenMode,myfont), 70))
+            # if not on screen 0 or changing screens then leave event loop
+            if screenMode >= 0 or screenMode != screenModePrior: break
 
-    labeltext = str(v['Speed']) + "mm/s"
-    label = myfont.render(labeltext , 1, (whitefont))
-    screen.blit(label, (xPos(labeltext,1,screenMode,myfont), 130))
-#   current motor direction
-    screen.blit(md[motorDirection], (60 ,180))
+            # first time through break out due to screen mode !=
+            # break out when not on screen 0
+            # break out when changing screens (effect only affects screen 1->0 flow)
 
-# initial (home) screen
-  if screenMode == 0:
-    myfont = pygame.font.SysFont("Arial", mediumfont)
-    myfont.set_bold(False)
 
-    if task_indicator != last_task:
-        screen.blit(pi[task_indicator], (130, 2))
+        if img is None or img.get_height() < 240: # Letterbox, clear background
+            screen.fill(0)
+        if img:
+            screen.blit(img,
+              ((320 - img.get_width() ) / 2,
+              (240 - img.get_height()) / 2))
 
-    sValue = float(v['Shutter'])
-    if (sValue < 1):
-        numeric = int(1 / sValue)
-        labeltext = "1/" + str(numeric) + "s"
-    else:
-        numeric = int(sValue)
-        labeltext = str(numeric) + "s"
-    label = myfont.render(labeltext , 1, (whitefont))
-    screen.blit(label, (xPos(labeltext,0,screenMode,myfont), 10))
+        # Overlay buttons on display and update
+        for i,b in enumerate(buttons[screenMode]):
+            b.draw(screen)
 
-#   run time
-    labeltext = str(round(travel_pulse,0)) + "s"
-    label = myfont.render(labeltext , 1, (whitefont))
-    screen.blit(label, (xPos(labeltext,1,screenMode,myfont), 90))
-#   pause time
-    labeltext = str(round(pause_time,0)) + "s"
-    label = myfont.render(labeltext , 1, (whitefont))
-    screen.blit(label, (xPos(labeltext,1,screenMode,myfont), 10))
-#   images remaining
-    labeltext = str(currentframe) + " of " + str(v['Images'])
-    label = myfont.render(labeltext , 1, (whitefont))
-    screen.blit(label, (xPos(labeltext,0,screenMode,myfont), 50))
-#   time remaining
-#    remaining = float((frame_interval * (v['Images'] - currentframe)))
-    remaining = round((float(v['Timespan']) * 60) - consumed_time,1)
-    if remaining > 0:
-        sec = timedelta(seconds=int(remaining))
-        d = datetime(1,1,1) + sec
-        if d.hour > 0:
-            labeltext = "%dh%dm%ds" % (d.hour, d.minute, d.second)
-        else:
-            labeltext = "%dm%ds" % (d.minute, d.second)
-        label = myfont.render(labeltext , 1, (whitefont))
-        screen.blit(label, (xPos(labeltext,1,screenMode,myfont), 50))
-#   show the motor direction
-    screen.blit(smd[motorDirection], (smdx[motorDirection],150))
+    # debug
+    #  print "screenMode..........." + str(screenMode)
+    #  print "screenModePrior......" + str(screenModePrior)
+    #  print "motorDirection......." + str(motorDirection)
+    #  print "motorDirectionPrior.." + str(motorDirectionPrior)
+    # keypad screens
+        if screenMode == 3 or screenMode == 2:
+            myfont = pygame.font.SysFont("Arial", largefont)
+            myfont.set_bold(False)
+            label = myfont.render(numberstring , 1, (whitefont))
+            screen.blit(label, (xPos(numberstring,0,screenMode,myfont), 2))
+            # blit the icon of the button pushed to get here
+            screen.blit(vi[dict_idx], (260, 0))
 
-  pygame.display.update()
 
-  screenModePrior = screenMode
+        # parameter screen
+        if screenMode == 1:
+        #  if  ((screenMode==1 and screenMode != screenModePrior)
+        #   or (screenMode==1 and motorDirection != motorDirectionPrior)):
+            motorDirectionPrior = motorDirection
+            myfont = pygame.font.SysFont("Arial", smallfont)
+            myfont.set_bold(True)
+
+            sValue = float(v['Shutter'])
+            if (sValue < 1):
+                numeric = int(1 / sValue)
+                labeltext = "1/" + str(numeric) + "s"
+            else:
+                numeric = int(sValue)
+                labeltext = str(numeric) + "s"
+            label = myfont.render(labeltext , 1, (whitefont))
+            screen.blit(label, (xPos(labeltext,0,screenMode,myfont), 10))
+
+            labeltext = str(v['Timespan']) + "min"
+            label = myfont.render(labeltext , 1, (whitefont))
+            screen.blit(label, (xPos(labeltext,0,screenMode,myfont), 70))
+
+            labeltext = str(v['Images'])
+            label = myfont.render(labeltext , 1, (whitefont))
+            screen.blit(label, (xPos(labeltext,0,screenMode,myfont), 130))
+
+            labeltext = str(v['Distance']) + "mm"
+            label = myfont.render(labeltext , 1, (whitefont))
+            screen.blit(label, (xPos(labeltext,1,screenMode,myfont), 10))
+
+            sValue = float(v['Settle'])
+            if (sValue == 0):
+                numeric = int(sValue)
+                label = myfont.render(str(numeric) + "s" , 1, (whitefont))
+            elif (sValue < 1):
+                numeric = int(1 / sValue)
+                labeltext = "1/" + str(numeric) + "s"
+            else:
+                numeric = int(sValue)
+                labeltext = str(numeric) + "s"
+            label = myfont.render(labeltext , 1, (whitefont))
+            screen.blit(label, (xPos(labeltext,1,screenMode,myfont), 70))
+
+            labeltext = str(v['Speed']) + "mm/s"
+            label = myfont.render(labeltext , 1, (whitefont))
+            screen.blit(label, (xPos(labeltext,1,screenMode,myfont), 130))
+        #   current motor direction
+            screen.blit(md[motorDirection], (60 ,180))
+
+        # initial (home) screen
+        if screenMode == 0:
+            myfont = pygame.font.SysFont("Arial", mediumfont)
+            myfont.set_bold(False)
+
+            if task_indicator != last_task:
+                screen.blit(pi[task_indicator], (130, 2))
+
+            sValue = float(v['Shutter'])
+            if (sValue < 1):
+                numeric = int(1 / sValue)
+                labeltext = "1/" + str(numeric) + "s"
+            else:
+                numeric = int(sValue)
+                labeltext = str(numeric) + "s"
+            label = myfont.render(labeltext , 1, (whitefont))
+            screen.blit(label, (xPos(labeltext,0,screenMode,myfont), 10))
+
+        #   run time
+            labeltext = str(round(travel_pulse,0)) + "s"
+            label = myfont.render(labeltext , 1, (whitefont))
+            screen.blit(label, (xPos(labeltext,1,screenMode,myfont), 90))
+        #   pause time
+            labeltext = str(round(pause_time,0)) + "s"
+            label = myfont.render(labeltext , 1, (whitefont))
+            screen.blit(label, (xPos(labeltext,1,screenMode,myfont), 10))
+        #   images remaining
+            labeltext = str(currentframe) + " of " + str(v['Images'])
+            label = myfont.render(labeltext , 1, (whitefont))
+            screen.blit(label, (xPos(labeltext,0,screenMode,myfont), 50))
+        #   time remaining
+        #    remaining = float((frame_interval * (v['Images'] - currentframe)))
+            remaining = round((float(v['Timespan']) * 60) - consumed_time,1)
+            if remaining > 0:
+                sec = timedelta(seconds=int(remaining))
+                d = datetime(1,1,1) + sec
+                if d.hour > 0:
+                    labeltext = "%dh%dm%ds" % (d.hour, d.minute, d.second)
+                else:
+                    labeltext = "%dm%ds" % (d.minute, d.second)
+                label = myfont.render(labeltext , 1, (whitefont))
+                screen.blit(label, (xPos(labeltext,1,screenMode,myfont), 50))
+        #   show the motor direction
+            screen.blit(smd[motorDirection], (smdx[motorDirection],150))
+
+        pygame.display.update()
+
+        screenModePrior = screenMode
+
+except KeyboardInterrupt:
+    # here you put any code you want to run before the program
+    # exits when you press CTRL+C
+    print "."
+    print "CTRL+C Out!"
+      
+#except:
+    # this catches ALL other exceptions including errors.
+    # You won't get any error messages for debugging
+    # so only use it once your code is working
+    #    print "Other error or exception occurred!"
+      
+finally:
+#   GPIO.cleanup() # this ensures a clean exit
+    print "GPIO Cleanup"
+    gpio.digitalWrite(motorpin,gpio.LOW)
+    gpio.digitalWrite(motorpinA,gpio.LOW)
+    gpio.digitalWrite(motorpinB,gpio.LOW)
+    gpio.digitalWrite(shutterpin,gpio.LOW)
+    gpio.digitalWrite(focuspin,gpio.LOW)
+    gpio.digitalWrite(redpin,gpio.LOW)
+    gpio.digitalWrite(greenpin,gpio.LOW)
+    gpio.digitalWrite(bluepin,gpio.LOW)
+
+    gpio.pinMode(shutterpin,gpio.INPUT)
+    gpio.pinMode(focuspin,gpio.INPUT)
+    gpio.pinMode(motorpin,gpio.INPUT)
+    gpio.pinMode(motorpinA,gpio.INPUT)
+    gpio.pinMode(motorpinB,gpio.INPUT)
+    gpio.pinMode(redpin,gpio.INPUT)
+    gpio.pinMode(greenpin,gpio.INPUT)
+    gpio.pinMode(bluepin,gpio.INPUT)
+    print "Done"

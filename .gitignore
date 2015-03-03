@@ -8,3 +8,7 @@
 docs/build/
 .DS_Store
 __pycache__
+
+pislide.py.bck
+
+pislidet.py
